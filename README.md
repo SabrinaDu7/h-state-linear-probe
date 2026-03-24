@@ -1,7 +1,6 @@
 # PRNN Hidden State NOR Classifcation
 
 Linear probe (binary) on PRNN hidden states: novel object in view or not.
-This repo uses comet logging.
 
 ## Data Format
 Data is saved in save_path as a .pt file and a parquet file with the following format:
@@ -12,7 +11,7 @@ Data is saved in save_path as a .pt file and a parquet file with the following f
         "obs_next": all_obs_next,
         "act": all_act,
         "states": all_states, # Contains agent_pos and agent_dir
-        "hidden_states": all_hidden,
+        "hidden_states": all_hidden, # Tensor[B, T, H]
         "labels": all_labels, # Tensor[B, T]`` that assigns an integer label to each (trajectory, timestep) pair
         "renders": all_renders,
         "config" : config # EvalTrajectoryConfig
@@ -44,7 +43,11 @@ Data is saved in save_path as a .pt file and a parquet file with the following f
 ## Data Pipeline
 - Data is generated in ```/RL_for_pRNN/scripts/analysis_OMT.py/```.
 - Data is symlink'ed to this repo ```ln -s ../RL_for_pRNN/outputs/data_cur_lroom_step1408_goal72/ ./data/```
-- K-Fold Cross-Validation (k=5 or 10) is the right choice. (stratified to avoid class imbalances)
+- Each data point is (label, hidden_state) with label == 1 if the hidden state came from a view where novel object was in-view.
+label == 0 if the novel object was NOT in view. 
+- K-Fold Cross-Validation (k=5) on ONE TIMESTEP and ONE goal location (stratified to avoid class imbalances)
+- Fold-splitting strategy is by trajectory (NOT TIMESTEP)
+
 
 ## Evaluation Setup
 
@@ -65,4 +68,4 @@ outputs/
 ```
 
 ## PITFALLS
-- **C for logistic regression scales as 1/patches** - More patches = stronger regularization needed
+- **C for logistic regression scales with dataset size** - 
