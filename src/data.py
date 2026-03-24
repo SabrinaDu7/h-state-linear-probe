@@ -160,6 +160,133 @@ def _parse_pt_file(path: Path) -> tuple[dict[str, str | None], dict[int, int] | 
     return shapes, label_counts
 
 
+def _load_hs_flat(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Load hidden_states and labels from a trajectories.pt file.
+
+    Returns:
+        hs_flat  : float32 array of shape (N, hidden_dim), N = B*T
+        lbl_flat : int/float array of shape (N,)
+    """
+    class _Unpickler(pickle.Unpickler):
+        def __init__(self, f):
+            super().__init__(f)
+            self._storages: dict[int, tuple[str, np.dtype]] = {}
+
+        def persistent_load(self, pid):
+            _, storage_cls, key, _location, _numel = pid
+            storage = (key, _NP_DTYPE_MAP.get(storage_cls.__name__, np.float32))
+            token = object()
+            self._storages[id(token)] = storage
+            return token
+
+        def find_class(self, module, name):
+            if name == '_rebuild_tensor_v2':
+                def _capture(storage, offset, size, stride, *args, **kwargs):
+                    return {'__sid__': id(storage), '__size__': size, '__offset__': offset}
+                return _capture
+            try:
+                return super().find_class(module, name)
+            except (ImportError, AttributeError):
+                return type(name, (object,), {
+                    '__init__': lambda self, *a, **kw: None,
+                    '__setstate__': lambda self, s: self.__dict__.update(s),
+                })
+
+    def _read_tensor(zf: zipfile.ZipFile, prefix: str, meta: dict, storages: dict) -> np.ndarray:
+        key, dtype = storages[meta['__sid__']]
+        with zf.open(f'{prefix}/data/{key}') as f:
+            raw = np.frombuffer(f.read(), dtype=dtype)
+        numel = int(np.prod(meta['__size__']))
+        return raw[meta['__offset__']: meta['__offset__'] + numel].reshape(meta['__size__'])
+
+    with zipfile.ZipFile(path) as zf:
+        prefix = zf.namelist()[0].split('/')[0]
+        with zf.open(f'{prefix}/data.pkl') as f:
+            up = _Unpickler(f)
+            result = up.load()
+        hs  = _read_tensor(zf, prefix, result['hidden_states'], up._storages)  # (B, T, 500)
+        lbl = _read_tensor(zf, prefix, result['labels'],        up._storages)  # (B, T)
+
+    return hs.reshape(-1, hs.shape[-1]), lbl.reshape(-1)
+
+
+def _norm_stats(hs_flat: np.ndarray, lbl_flat: np.ndarray) -> dict[str, float]:
+    """L2 norm of the mean hidden-state vector for all / label-0 / label-1."""
+    def _norm(arr: np.ndarray) -> float:
+        return float(np.linalg.norm(arr.mean(axis=0)))
+    return {
+        'norm_all':    _norm(hs_flat),
+        'norm_label0': _norm(hs_flat[lbl_flat == 0]),
+        'norm_label1': _norm(hs_flat[lbl_flat == 1]),
+    }
+
+
+def _load_hs_stats(path: Path) -> dict[str, float]:
+    """
+    Norm of the mean hidden-state vector (all 500 dims) for all / label-0 / label-1.
+    """
+    hs_flat, lbl_flat = _load_hs_flat(path)
+    return _norm_stats(hs_flat, lbl_flat)
+
+
+def _load_hs_topk_stats(path: Path, k: int = 100) -> dict[str, float]:
+    """
+    Select the top-k dimensions by overall std, then compute the norm of the
+    mean hidden-state vector restricted to those dimensions.
+
+    Top-k indices are chosen from all samples (class-agnostic), then the same
+    indices are applied when filtering by label.
+    """
+    hs_flat, lbl_flat = _load_hs_flat(path)
+    top_idx = np.argsort(hs_flat.std(axis=0))[-k:]   # (k,) indices of highest-std dims
+    hs_topk = hs_flat[:, top_idx]                     # (N, k)
+    return _norm_stats(hs_topk, lbl_flat)
+
+
+def _goal_dirs(goal: str, data_dir: Path) -> list[tuple[int, Path]]:
+    pattern = re.compile(rf"data_cur_lroom_step(\d+)_goal{re.escape(goal)}$")
+    return sorted(
+        [(int(m.group(1)), d) for d in data_dir.iterdir() if (m := pattern.match(d.name))],
+        key=lambda x: x[0],
+    )
+
+
+def get_hs_stats_dataframe(
+    goal: str,
+    data_dir: Path = DATA_DIR,
+) -> pd.DataFrame:
+    """
+    Norm of the mean hidden-state vector (all 500 dims) across step checkpoints.
+
+      index   : ['norm_all', 'norm_label0', 'norm_label1']
+      columns : step counts (sorted ascending)
+    """
+    stats_data = {step: _load_hs_stats(d / 'trajectories.pt') for step, d in _goal_dirs(goal, data_dir)}
+    return pd.DataFrame(stats_data).rename_axis('stat')
+
+
+def get_hs_topk_stats_dataframe(
+    goal: str,
+    data_dir: Path = DATA_DIR,
+    k: int = 100,
+) -> pd.DataFrame:
+    """
+    Norm of the mean hidden-state vector restricted to the top-k highest-std
+    dimensions across step checkpoints.
+
+    Top-k dimensions are selected per checkpoint by overall (class-agnostic) std.
+
+      index   : ['norm_all', 'norm_label0', 'norm_label1']
+      columns : step counts (sorted ascending)
+    """
+    stats_data = {
+        step: _load_hs_topk_stats(d / 'trajectories.pt', k=k)
+        for step, d in _goal_dirs(goal, data_dir)
+    }
+    return pd.DataFrame(stats_data).rename_axis('stat')
+
+
 def get_goal_dataframes(
     goal: str,
     data_dir: Path = DATA_DIR,
@@ -207,6 +334,8 @@ _pool = ProcessPoolExecutor()
 # ## Goal location: [7, 2]
 # %%
 shapes_72, labels_72 = get_goal_dataframes('72', _pool=_pool)
+hs_stats_72 = get_hs_stats_dataframe('72')
+hs_topk_stats_72 = get_hs_topk_stats_dataframe('72')
 
 # %%
 if __name__ == "__main__":
@@ -214,11 +343,17 @@ if __name__ == "__main__":
     print(shapes_72.to_string())
     print("\n=== Goal [7, 2] — Label counts ===")
     print(labels_72.to_string())
+    print("\n=== Goal [7, 2] — Hidden State Stats ===")
+    print(hs_stats_72.to_string())
+    print("\n=== Goal [7, 2] — Hidden State Top-100 Std Stats ===")
+    print(hs_topk_stats_72.to_string())
 
 # %% [markdown]
 # ## Goal location: [7, 11]
 # %%
 shapes_711, labels_711 = get_goal_dataframes('711', _pool=_pool)
+hs_stats_711 = get_hs_stats_dataframe('711')
+hs_topk_stats_711 = get_hs_topk_stats_dataframe('711')
 
 # %%
 if __name__ == "__main__":
@@ -226,11 +361,17 @@ if __name__ == "__main__":
     print(shapes_711.to_string())
     print("\n=== Goal [7, 11] — Label counts ===")
     print(labels_711.to_string())
+    print("\n=== Goal [7, 11] — Hidden State Stats ===")
+    print(hs_stats_711.to_string())
+    print("\n=== Goal [7, 11] — Hidden State Top-100 Std Stats ===")
+    print(hs_topk_stats_711.to_string())
 
 # %% [markdown]
 # ## Goal location: [14, 7]
 # %%
 shapes_147, labels_147 = get_goal_dataframes('147', _pool=_pool)
+hs_stats_147 = get_hs_stats_dataframe('147')
+hs_topk_stats_147 = get_hs_topk_stats_dataframe('147')
 _pool.shutdown(wait=False)
 
 # %%
@@ -239,3 +380,7 @@ if __name__ == "__main__":
     print(shapes_147.to_string())
     print("\n=== Goal [14, 7] — Label counts ===")
     print(labels_147.to_string())
+    print("\n=== Goal [14, 7] — Hidden State Stats ===")
+    print(hs_stats_147.to_string())
+    print("\n=== Goal [14, 7] — Hidden State Top-100 Std Stats ===")
+    print(hs_topk_stats_147.to_string())
