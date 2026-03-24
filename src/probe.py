@@ -9,7 +9,7 @@ import pandas as pd
 import torch
 import tyro
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import LeaveOneGroupOut, StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -47,16 +47,20 @@ def _make_objective(X_train: np.ndarray, y_train: np.ndarray, X_val: np.ndarray,
     return objective
 
 
-def load_and_flatten(data_paths: list[Path]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_and_flatten(
+    data_paths: list[Path],
+    goal_values: list[int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Load one or more trajectories.pt files and concatenate into a single array.
 
-    X: [sum(B_i*T_i), H] float32
-    y: [sum(B_i*T_i)]    int64
-    groups: [sum(B_i*T_i)] int64 — globally unique trajectory IDs (no cross-dataset leakage)
+    X:        [sum(B_i*T_i), H] float32
+    y:        [sum(B_i*T_i)]    int64
+    groups:   [sum(B_i*T_i)]    int64 — globally unique trajectory IDs
+    goal_ids: [sum(B_i*T_i)]    int64 — index into goal_values for each sample
     """
-    Xs, ys, group_chunks = [], [], []
+    Xs, ys, group_chunks, goal_chunks = [], [], [], []
     group_offset = 0
-    for path in data_paths:
+    for goal_idx, (path, _) in enumerate(zip(data_paths, goal_values)):
         t0 = time.time()
         data = load_eval_trajectories(path)
         log.info(f"Loaded {path.parent.name} in {time.time()-t0:.2f}s")
@@ -69,13 +73,15 @@ def load_and_flatten(data_paths: list[Path]) -> tuple[np.ndarray, np.ndarray, np
         Xs.append(hidden.reshape(B * T, H).astype(np.float32))
         ys.append(labels.reshape(B * T).astype(np.int64))
         group_chunks.append(np.repeat(np.arange(B) + group_offset, T))
+        goal_chunks.append(np.full(B * T, goal_idx, dtype=np.int64))
         group_offset += B
 
-    X = np.concatenate(Xs, axis=0)
-    y = np.concatenate(ys, axis=0)
+    X      = np.concatenate(Xs,           axis=0)
+    y      = np.concatenate(ys,           axis=0)
     groups = np.concatenate(group_chunks, axis=0)
+    goal_ids = np.concatenate(goal_chunks, axis=0)
     log.info(f"Combined: {X.shape[0]} samples total")
-    return X, y, groups
+    return X, y, groups, goal_ids
 
 
 def eval_metrics(clf: LogisticRegression, scaler: StandardScaler,
@@ -98,15 +104,24 @@ def train(cfg: Config) -> list[dict]:
 
     log.info(f"Loading data from {cfg.data_paths} ...")
     t0 = time.time()
-    X, y, groups = load_and_flatten(cfg.data_paths)
+    X, y, groups, goal_ids = load_and_flatten(cfg.data_paths, cfg.dataset_goals)
     t_load = time.time() - t0
 
-    cv = StratifiedGroupKFold(n_splits=cfg.n_splits, shuffle=True, random_state=cfg.seed)
+    if cfg.logo:
+        splits = list(LeaveOneGroupOut().split(X, y, goal_ids))
+        # fold label = the actual goal value that was held out
+        fold_labels = [int(cfg.dataset_goals[int(np.unique(goal_ids[val_idx])[0])]) for _, val_idx in splits]
+        log.info(f"LOGO: {len(splits)} folds, held-out goals: {fold_labels}")
+    else:
+        splits = list(StratifiedGroupKFold(n_splits=cfg.n_splits, shuffle=True, random_state=cfg.seed).split(X, y, groups))
+        fold_labels = list(range(len(splits)))
+
     fold_metrics: list[dict] = []
     all_trials: list[pd.DataFrame] = []
 
-    for fold, (train_idx, val_idx) in enumerate(cv.split(X, y, groups)):
-        log.info(f"\n--- Fold {fold} | train={len(train_idx)}, val={len(val_idx)} ---")
+    for fold_label, (train_idx, val_idx) in zip(fold_labels, splits):
+        held_out_str = f" (held-out goal: {fold_label})" if cfg.logo else ""
+        log.info(f"\n--- Fold {fold_label}{held_out_str} | train={len(train_idx)}, val={len(val_idx)} ---")
         X_tr_raw, X_val_raw = X[train_idx], X[val_idx]
         y_tr, y_val = y[train_idx], y[val_idx]
 
@@ -126,7 +141,7 @@ def train(cfg: Config) -> list[dict]:
         log.info(f"  Optuna: {cfg.n_trials} trials in {t_optuna:.1f}s, avg_fit={avg_fit_ms:.0f}ms, best_C={best_C:.2e}")
 
         trials_df = pd.DataFrame([{
-            "fold": fold, "trial": t.number, "C": t.params["C"],
+            "fold": fold_label, "trial": t.number, "C": t.params["C"],
             "val_auc_roc": t.value, "fit_ms": t.user_attrs.get("fit_time", 0) * 1000,
         } for t in study.trials])
         all_trials.append(trials_df)
@@ -140,7 +155,7 @@ def train(cfg: Config) -> list[dict]:
         log.info(f"  Val:   {val_m}")
 
         fold_metrics.append({
-            "fold": fold,
+            "fold": fold_label,
             "best_C": best_C,
             "n_train": len(train_idx),
             "n_val": len(val_idx),
@@ -159,10 +174,10 @@ def train(cfg: Config) -> list[dict]:
                 "scaler_mean": scaler.mean_,
                 "scaler_scale": scaler.scale_,
                 "best_C": best_C,
-                "fold": fold,
+                "fold": fold_label,
                 "val_auc_roc": study.best_value,
             },
-            cfg.probes_dir / f"{cfg.dataset_name}_fold{fold}.pt",
+            cfg.probes_dir / f"{cfg.dataset_name}_fold{fold_label}.pt",
         )
 
     # Save metrics parquet (upsert by dataset_name + fold)

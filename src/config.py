@@ -23,11 +23,13 @@ class Config:
     n_splits: int = 5
     n_trials: int = 15
     seed: int = 42
+    logo: bool = False  # leave-one-goal-out CV instead of StratifiedGroupKFold
 
     @property
     def dataset_name(self) -> str:
         goals_str = "_".join(str(g) for g in self.dataset_goals)
-        return f"probe_step{self.dataset_step}_goal{goals_str}"
+        suffix = "_logo" if self.logo else ""
+        return f"probe_step{self.dataset_step}_goal{goals_str}{suffix}"
 
     @property
     def data_paths(self) -> list[Path]:
