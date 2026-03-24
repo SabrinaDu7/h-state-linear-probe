@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "src"
+version = "0.1.0"
+description = "High-resolution dichotomous image segmentation with DINOv3"
+requires-python = ">=3.12"
+dependencies = [
+    "minigrid", # Custom Minigrid package in local folder
+    "prnn", # Custom prnn package in local folder
+    "torch>=2.0",
+    "torchvision",
+    "tqdm",
+    "matplotlib",
+    "scikit-learn",
+    "pillow",
+    "pyarrow",
+    "tyro>=1.0.5",
+    "optuna>=4.6.0",
+    "pandas>=2.3.3",
+    "scipy>=1.17.0",
+    "statsmodels>=0.14.6",
+    "comet-ml>=3.57.3",
+    "ipykernel>=7.2.0",
+    "jupytext>=1.19.1",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv.sources]
+minigrid = { path = "../minigrid", editable=true }
+prnn = { path = "../pRNN", editable=true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.basedpyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test.py"]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.37.1",
+    "ipython>=9.9.0",
+    "pypatree>=0.3.0",
+    "pytest>=9.0.2",
+    "ruff>=0.14.12",
+]
