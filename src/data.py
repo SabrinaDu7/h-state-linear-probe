@@ -31,8 +31,6 @@ import zipfile
 import numpy as np
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
-from jaxtyping import Float
-from typing import Literal
 from pathlib import Path
 from matplotlib import pyplot as plt
 import warnings
@@ -384,3 +382,42 @@ if __name__ == "__main__":
     print(hs_stats_147.to_string())
     print("\n=== Goal [14, 7] — Hidden State Top-100 Std Stats ===")
     print(hs_topk_stats_147.to_string())
+
+
+# %% [markdown]
+# ## Verify LOGO
+# %%
+"""Quick sanity-check: print which samples land in each LOGO val fold."""
+import sys
+from pathlib import Path
+from collections import Counter
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from config import Config
+from probe import load_and_flatten
+from sklearn.model_selection import LeaveOneGroupOut
+
+# %%
+cfg = Config(dataset_step=1208, dataset_goals=[72, 711, 147], logo=True)
+
+print(f"Loading data for goals {cfg.dataset_goals} at step {cfg.dataset_step}...\n")
+X, y, groups, goal_ids = load_and_flatten(cfg.data_paths, cfg.dataset_goals)
+
+splits = list(LeaveOneGroupOut().split(X, y, goal_ids))
+fold_labels = [int(cfg.dataset_goals[int(np.unique(goal_ids[val_idx])[0])]) for _, val_idx in splits]
+
+print(f"Total samples: {len(X)}  |  goal_ids unique values: {np.unique(goal_ids)}\n")
+
+for fold_label, (train_idx, val_idx) in zip(fold_labels, splits):
+    val_goals = np.unique(goal_ids[val_idx])
+    train_goals = np.unique(goal_ids[train_idx])
+    val_label_counts = Counter(y[val_idx].tolist())
+    train_label_counts = Counter(y[train_idx].tolist())
+
+    print(f"--- Held-out goal: {fold_label} ---")
+    print(f"  val   indices: {len(val_idx):>6}  |  goal_ids in val:   {val_goals}  |  labels: {dict(val_label_counts)}")
+    print(f"  train indices: {len(train_idx):>6}  |  goal_ids in train: {train_goals}  |  labels: {dict(train_label_counts)}")
+    print()
