@@ -97,14 +97,16 @@ def eval_metrics(clf: LogisticRegression, scaler: StandardScaler,
     )
 
 
-def train(cfg: Config) -> list[dict]:
+def train(cfg: Config, loader=None) -> list[dict]:
+    if loader is None:
+        loader = load_and_flatten
     set_seed(cfg.seed)
     cfg.probes_dir.mkdir(parents=True, exist_ok=True)
     cfg.metrics_dir.mkdir(parents=True, exist_ok=True)
 
     log.info(f"Loading data from {cfg.data_paths} ...")
     t0 = time.time()
-    X, y, groups, goal_ids = load_and_flatten(cfg.data_paths, cfg.dataset_goals)
+    X, y, groups, goal_ids = loader(cfg.data_paths, cfg.dataset_goals)
     t_load = time.time() - t0
 
     if cfg.logo:
